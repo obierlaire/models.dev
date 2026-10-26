@@ -40,15 +40,7 @@ const Fx = z.object({
   fixing: z.string().optional(),
 }).passthrough();
 
-// A pinned `<host>/<creator>/<model>` entry, parsed only when an auto ID routes
-// to it, so a malformed entry the sync never reads cannot fail the run.
-const Pinned = z.object({
-  fx: z.array(Fx).optional(),
-  regions: z.array(z.object({
-    locode: z.string(),
-    pricing: Pricing.optional(),
-  }).passthrough()).optional(),
-}).passthrough();
+const Conversion = z.array(Fx).optional();
 
 const LowRouterEntry = z.object({
   id: z.string().min(1),
@@ -131,16 +123,16 @@ export function lowRouterModels(entries: Array<{ id: string }>): LowRouterModel[
     // cannot fail the run.
     .filter((entry) => entry.id.startsWith("auto/") && entry.id.split("/").length === 3
       && ((entry as { modality?: unknown }).modality ?? "chat") === "chat")
-    .map((entry) => LowRouterEntry.parse(entry))
+    // A malformed entry is dropped like an unlisted one; a file behind it is
+    // kept and named in the notices.
+    .flatMap((entry) => LowRouterEntry.safeParse(entry).data ?? [])
     .filter((entry) => (entry.endpoints ?? []).includes("chat.completions"))
     .map((entry) => {
       const route = entry.auto_routing?.default_routes?.[0];
       const cut = route?.lastIndexOf("/") ?? -1;
       const host = route === undefined || cut === -1 ? undefined : pinned.get(route.slice(0, cut));
-      // A malformed quote counts as none: a file behind it keeps its cost with a
-      // notice, and an ID with no file here cannot fail the run.
-      const quote = host === undefined ? undefined : Pinned.safeParse(host).data;
-      const pricing = quote?.regions?.find((region) => region.locode === route!.slice(cut + 1))?.pricing;
+      const quote = host === undefined ? undefined : routeQuote(host, route!.slice(cut + 1));
+      const pricing = quote?.pricing;
       if (pricing !== undefined && pricing.currency.toUpperCase() !== "USD") {
         throw new Error(`LowRouter ${entry.id}: expected a USD quote from ${API_ENDPOINT}, got ${pricing.currency}`);
       }
@@ -153,6 +145,20 @@ export function lowRouterModels(entries: Array<{ id: string }>): LowRouterModel[
     );
   }
   return models;
+}
+
+// The quote of one region of a pinned `<host>/<creator>/<model>` entry, with the
+// entry's conversion. Only that region and `fx` are parsed, so a malformed
+// sibling region cannot void it. A malformed quote counts as none: a file behind
+// it keeps its cost with a notice, and an ID with no file here cannot fail the run.
+function routeQuote(host: object, locode: string) {
+  const { regions, fx } = host as { regions?: unknown; fx?: unknown };
+  const region = Array.isArray(regions)
+    ? regions.find((item) => (item as { locode?: unknown } | null)?.locode === locode) as { pricing?: unknown } | undefined
+    : undefined;
+  const pricing = Pricing.safeParse(region?.pricing);
+  const conversion = Conversion.safeParse(fx);
+  return pricing.success && conversion.success ? { pricing: pricing.data, fx: conversion.data } : undefined;
 }
 
 // The default route's quote and LowRouter's deprecation flag are synced;

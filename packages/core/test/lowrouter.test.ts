@@ -214,6 +214,18 @@ test("a malformed quote counts as none and does not fail the run", () => {
     { id: "brokenhost/testlab/broken-model", regions: [{ locode: "eu", pricing: { currency: "USD", prompt_per_1m_tokens: -1 } }] },
   ]);
   expect(broken?.pricing).toBeUndefined();
+  const [sibling] = parse([
+    autoEntry("auto/testlab/test-model", "somehost/testlab/test-model/eu"),
+    {
+      ...pinnedEntry("somehost/testlab/test-model", "eu", { prompt_per_1m_tokens: 0.5, completion_per_1m_tokens: 1 }),
+      regions: [
+        { locode: "eu", pricing: { currency: "USD", prompt_per_1m_tokens: 0.5, completion_per_1m_tokens: 1 } },
+        { locode: "us", pricing: { currency: "USD", prompt_per_1m_tokens: null } },
+      ],
+    },
+  ]);
+  expect(sibling?.pricing).toMatchObject({ prompt_per_1m_tokens: 0.5 });
+  expect(parse([autoEntry("auto/testlab/null-model", "somehost/testlab/null-model/eu", { lifecycle: null })])).toEqual([]);
 });
 
 test("a moved price keeps toggle wire paths and drops an Anthropic route line from the price block", () => {
