@@ -37,7 +37,7 @@ function autoEntry(id: string, route: string, overrides: Record<string, unknown>
     modality: "chat",
     lifecycle: "active",
     endpoints: ["chat.completions", "messages", "responses"],
-    auto_routing: { candidates: [route], default_routes: [route] },
+    auto_routing: { default_routes: [route] },
     ...overrides,
   };
 }
@@ -137,7 +137,7 @@ test("refreshes the price from the default route and keeps authored reasoning", 
   expect(built.notices).toBeUndefined();
 });
 
-test("keeps an authored cache price the route does not quote", () => {
+test("keeps an authored cache price the route does not quote, and the header with an unchanged price", () => {
   const built = buildLowRouterModel(
     model({ pricing: { currency: "USD", prompt_per_1m_tokens: 4, completion_per_1m_tokens: 20, cache_read_per_1m_tokens: 0.4 } }),
     existing(PLAIN_MODEL, { cost: { input: 4, output: 20, cache_read: 0.4, cache_write: 5 } }),
@@ -169,15 +169,6 @@ test("an unpriced route keeps the authored cost and says so", () => {
   ]);
 });
 
-test("a header is kept byte for byte while the price holds", () => {
-  const unchanged = buildLowRouterModel(
-    model(),
-    existing(PLAIN_MODEL, { cost: { input: 0.5282, output: 1.5845, cache_read: 0.0528 } }),
-    HEADER,
-  );
-  expect(unchanged.header).toBe(HEADER);
-});
-
 test("a moved price replaces the cost lines and keeps the hand-written evidence", () => {
   const header = buildLowRouterModel(model(), existing(PLAIN_MODEL), HEADER).header;
   expect(header).toStartWith("# Source: https://api.lowrouter.ai/v1/models?currency=usd (synced).\n");
@@ -185,6 +176,12 @@ test("a moved price replaces the cost lines and keeps the hand-written evidence"
   expect(header).toEndWith("# Effort: reasoning_effort = none|high, forwarded unchanged.\n# Limit: verified live.\n");
   expect(lowRouterHeader(header, true)).toBe(header);
   expect(lowRouterHeader("# Cost: old route only.\n", true)).not.toContain("old route");
+});
+
+test("translateModel reads the header the runner passes in", () => {
+  const file = existing(PLAIN_MODEL, { cost: { input: 0.5282, output: 1.5845, cache_read: 0.0528 } });
+  const context = { existing: () => file, authored: () => file, header: () => HEADER };
+  expect(lowrouter.translateModel(model(), context)).toMatchObject({ id: "auto/testlab/test-model", header: HEADER });
 });
 
 test("IDs without a file are skipped and summarized by creator", () => {

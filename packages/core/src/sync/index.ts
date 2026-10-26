@@ -135,6 +135,8 @@ export interface SyncProvider<SourceModel> {
       authored(id: string): ExistingModel | undefined;
       /** The existing file's TOML. */
       v2?(id: string): Record<string, unknown> | undefined;
+      /** The existing file's leading comment block, as compared for headerChanged. */
+      header?(id: string): string | undefined;
     },
   ): {
     id: string;
@@ -355,6 +357,9 @@ export async function syncProvider<SourceModel>(
         },
         v2(id) {
           return existing.get(`${id}.toml`)?.v2;
+        },
+        header(id) {
+          return existing.get(`${id}.toml`)?.header;
         },
       });
     } catch (error) {

@@ -1,18 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
-
 import { z } from "zod";
 
-import type { ExistingModel, SyncedFullModel, SyncedModel, SyncProvider } from "../index.js";
+import type { ExistingModel, SyncedFullModel, SyncProvider } from "../index.js";
 import { factorBaseModel } from "./openrouter.js";
 
 // `?currency=usd` quotes every route in USD, converting EUR-billed routes at
 // LowRouter's monthly ECB fixing.
 const API_ENDPOINT = "https://api.lowrouter.ai/v1/models?currency=usd";
-
-const ROOT_DIR = path.join(import.meta.dirname, "..", "..", "..", "..", "..");
-
-const MODELS_DIR = "providers/lowrouter/models";
 
 // The feed lists over 200 chat auto IDs. Missing files are kept either way, but a
 // short list that still parses is a truncated response, not a catalog to sync.
@@ -68,7 +61,7 @@ export interface LowRouterModel {
 export const lowrouter = {
   id: "lowrouter",
   name: "LowRouter",
-  modelsDir: MODELS_DIR,
+  modelsDir: "providers/lowrouter/models",
   // Absence is not retirement: LowRouter flags retiring IDs as deprecated, and
   // an ID can leave the chat listing while still served elsewhere.
   deleteMissing: false,
@@ -78,7 +71,6 @@ export const lowrouter = {
   // Hundreds of IDs have no file yet; an issue each would flood the tracker
   // and hand LowRouter's reasoning metadata to the issue-fixer agent.
   trackMissingModels: false,
-  // A header is only replaced when the price under it moves (see lowRouterHeader).
   authoritativeHeaders: true,
   sourceID(model) {
     return model.id;
@@ -110,7 +102,7 @@ export const lowrouter = {
   translateModel(model, context) {
     const existing = context.existing(model.id);
     if (existing === undefined) return undefined;
-    return { id: model.id, ...buildLowRouterModel(model, existing, existingHeader(model.id)) };
+    return { id: model.id, ...buildLowRouterModel(model, existing, context.header?.(model.id) ?? "") };
   },
 } satisfies SyncProvider<LowRouterModel>;
 
@@ -126,8 +118,10 @@ export function lowRouterModels(entries: LowRouterEntry[]): LowRouterModel[] {
       && (entry.endpoints ?? []).includes("chat.completions"))
     .map((entry) => {
       const route = entry.auto_routing?.default_routes?.[0];
-      const [host, creator, name, locode] = route?.split("/") ?? [];
-      const pricing = pinned.get(`${host}/${creator}/${name}`)?.regions?.find((region) => region.locode === locode)?.pricing;
+      const cut = route?.lastIndexOf("/") ?? -1;
+      const pricing = route === undefined || cut === -1
+        ? undefined
+        : pinned.get(route.slice(0, cut))?.regions?.find((region) => region.locode === route.slice(cut + 1))?.pricing;
       if (pricing !== undefined && pricing.currency !== "USD") {
         throw new Error(`LowRouter ${entry.id}: expected a USD quote from ${API_ENDPOINT}, got ${pricing.currency}`);
       }
@@ -142,48 +136,33 @@ export function lowRouterModels(entries: LowRouterEntry[]): LowRouterModel[] {
   return models;
 }
 
-// The leading comment block, cut exactly as the runner cuts it, so an
-// unchanged header compares equal.
-function existingHeader(id: string) {
-  const file = path.join(ROOT_DIR, MODELS_DIR, `${id}.toml`);
-  if (!existsSync(file)) return "";
-  const lines = readFileSync(file, "utf8").split("\n");
-  const end = lines.findIndex((line) => line.trim() !== "" && !line.trim().startsWith("#"));
-  const header = lines.slice(0, end === -1 ? lines.length : end);
-  while (header.length > 0 && header.at(-1)!.trim() === "") header.pop();
-  return header.length > 0 ? `${header.join("\n")}\n` : "";
-}
-
 // The default route's quote and LowRouter's deprecation flag are synced;
 // reasoning controls, capabilities and limits stay hand-authored.
 export function buildLowRouterModel(model: LowRouterModel, existing: ExistingModel, header: string) {
   const { base_model: baseModel, base_model_omit: baseModelOmit, ...current } = existing;
-  const status = model.deprecated ? "deprecated" : existing.status;
   const { pricing } = model;
-  if (pricing === undefined) {
-    const values = { ...current, status } as SyncedFullModel;
-    return {
-      model: factor(values),
-      header,
-      notices: [`LowRouter ${model.id}: default route ${model.route ?? "(none)"} has no quote; kept the authored cost.`],
-    };
-  }
-
   // A route that quotes no cache price (OpenAI's publish no cache write) keeps
   // the authored one rather than losing it.
-  const quote = {
+  const quote = pricing && {
     input: pricing.prompt_per_1m_tokens,
     output: pricing.completion_per_1m_tokens,
     cache_read: pricing.cache_read_per_1m_tokens ?? existing.cost?.cache_read,
     cache_write: pricing.cache_write_per_1m_tokens ?? existing.cost?.cache_write,
   };
-  const moved = Object.entries(quote).some(([key, value]) => existing.cost?.[key as keyof typeof quote] !== value);
-  const values = { ...current, cost: { ...existing.cost, ...quote }, status } as SyncedFullModel;
-  return { model: factor(values), header: lowRouterHeader(header, moved) };
-
-  function factor(values: SyncedFullModel): SyncedModel {
-    return baseModel === undefined ? values : factorBaseModel(baseModel, values, existing.limit, baseModelOmit);
-  }
+  const moved = quote !== undefined
+    && Object.entries(quote).some(([key, value]) => existing.cost?.[key as keyof typeof quote] !== value);
+  const values = {
+    ...current,
+    cost: quote === undefined ? existing.cost : { ...existing.cost, ...quote },
+    status: model.deprecated ? "deprecated" : existing.status,
+  } as SyncedFullModel;
+  return {
+    model: baseModel === undefined ? values : factorBaseModel(baseModel, values, existing.limit, baseModelOmit),
+    header: lowRouterHeader(header, moved),
+    notices: quote === undefined
+      ? [`LowRouter ${model.id}: default route ${model.route ?? "(none)"} has no quote; kept the authored cost.`]
+      : undefined,
+  };
 }
 
 // An unchanged price keeps its header byte for byte. A moved one gets the
