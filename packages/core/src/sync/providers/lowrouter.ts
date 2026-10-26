@@ -52,8 +52,12 @@ const LowRouterEntry = z.object({
   }).passthrough().optional(),
 }).passthrough();
 
+// Only `data` is checked here: an entry with no string `id` is neither a chat ID
+// nor a route's pinned entry, so it is skipped rather than failing the run.
 export const LowRouterResponse = z.object({
-  data: z.array(z.object({ id: z.string().min(1) }).passthrough()),
+  data: z.array(z.unknown()).transform((entries) => entries.filter(
+    (entry): entry is { id: string } => typeof (entry as { id?: unknown } | null)?.id === "string",
+  )),
 }).passthrough();
 
 /** An `auto/<creator>/<model>` ID with its default route's quote. */

@@ -226,6 +226,7 @@ test("a malformed quote counts as none and does not fail the run", () => {
   ]);
   expect(sibling?.pricing).toMatchObject({ prompt_per_1m_tokens: 0.5 });
   expect(parse([autoEntry("auto/testlab/null-model", "somehost/testlab/null-model/eu", { lifecycle: null })])).toEqual([]);
+  expect(parse([{ id: null, modality: "embedding" }, null])).toEqual([]);
 });
 
 test("a moved price keeps toggle wire paths and drops an Anthropic route line from the price block", () => {
