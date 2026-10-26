@@ -202,13 +202,18 @@ test("a synced header stays put while the price holds, and its evidence survives
   expect(lowRouterHeader(synced, rerouted, true)).toBe(rerouted.join("\n") + "\n" + evidence);
 });
 
-test("a malformed entry no auto ID routes to does not fail the run", () => {
+test("a malformed quote counts as none and does not fail the run", () => {
   const [priced] = parse([
     autoEntry("auto/testlab/test-model", "somehost/testlab/test-model/eu"),
     pinnedEntry("somehost/testlab/test-model", "eu", { prompt_per_1m_tokens: 0.5, completion_per_1m_tokens: 1 }),
     { id: "embedhost/testlab/test-embed", regions: [{ locode: "eu", pricing: { currency: "USD", prompt_per_1m_tokens: 0.1 } }] },
   ]);
   expect(priced?.pricing).toMatchObject({ prompt_per_1m_tokens: 0.5 });
+  const [broken] = parse([
+    autoEntry("auto/testlab/broken-model", "brokenhost/testlab/broken-model/eu"),
+    { id: "brokenhost/testlab/broken-model", regions: [{ locode: "eu", pricing: { currency: "USD", prompt_per_1m_tokens: -1 } }] },
+  ]);
+  expect(broken?.pricing).toBeUndefined();
 });
 
 test("a moved price keeps toggle wire paths and drops an Anthropic route line from the price block", () => {

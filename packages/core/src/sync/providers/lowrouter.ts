@@ -64,8 +64,6 @@ export const LowRouterResponse = z.object({
   data: z.array(z.object({ id: z.string().min(1) }).passthrough()),
 }).passthrough();
 
-type LowRouterEntry = z.infer<typeof LowRouterEntry>;
-
 /** An `auto/<creator>/<model>` ID with its default route's quote. */
 export interface LowRouterModel {
   id: string;
@@ -129,20 +127,19 @@ export const lowrouter = {
 export function lowRouterModels(entries: Array<{ id: string }>): LowRouterModel[] {
   const pinned = new Map(entries.map((entry) => [entry.id, entry]));
   const models = entries
-    .filter((entry) => entry.id.startsWith("auto/") && entry.id.split("/").length === 3)
+    // Only chat entries are parsed, so a malformed embedding or realtime entry
+    // cannot fail the run.
+    .filter((entry) => entry.id.startsWith("auto/") && entry.id.split("/").length === 3
+      && ((entry as { modality?: unknown }).modality ?? "chat") === "chat")
     .map((entry) => LowRouterEntry.parse(entry))
-    .filter((entry) =>
-      (entry.modality ?? "chat") === "chat"
-      && (entry.endpoints ?? []).includes("chat.completions"))
+    .filter((entry) => (entry.endpoints ?? []).includes("chat.completions"))
     .map((entry) => {
       const route = entry.auto_routing?.default_routes?.[0];
       const cut = route?.lastIndexOf("/") ?? -1;
       const host = route === undefined || cut === -1 ? undefined : pinned.get(route.slice(0, cut));
-      const parsed = host === undefined ? undefined : Pinned.safeParse(host);
-      if (parsed?.success === false) {
-        throw new Error(`LowRouter ${entry.id}: default route ${route} has a malformed quote`, { cause: parsed.error });
-      }
-      const quote = parsed?.data;
+      // A malformed quote counts as none: a file behind it keeps its cost with a
+      // notice, and an ID with no file here cannot fail the run.
+      const quote = host === undefined ? undefined : Pinned.safeParse(host).data;
       const pricing = quote?.regions?.find((region) => region.locode === route!.slice(cut + 1))?.pricing;
       if (pricing !== undefined && pricing.currency.toUpperCase() !== "USD") {
         throw new Error(`LowRouter ${entry.id}: expected a USD quote from ${API_ENDPOINT}, got ${pricing.currency}`);
@@ -192,7 +189,10 @@ export function buildLowRouterModel(model: LowRouterModel, existing: ExistingMod
 // and the conversion behind it, which AGENTS.md asks a converted price to note
 // with its rate and date. A new rate moves the price, so it is never stale.
 export function lowRouterCostHeader(model: LowRouterModel) {
-  const [host, , , locode] = model.route?.split("/") ?? [];
+  // Split as lowRouterModels does: the host is the first segment, the locode the last.
+  const route = model.route ?? "";
+  const host = route.slice(0, route.indexOf("/"));
+  const locode = route.slice(route.lastIndexOf("/") + 1);
   const [fx] = model.fx ?? [];
   const via = [fx?.source?.toUpperCase(), fx?.fixing && `${fx.fixing} fixing`].filter(Boolean).join(" ");
   return [
