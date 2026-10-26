@@ -27,6 +27,7 @@ The grouped sync targets are available for local convenience, but CI syncs each 
 - `bun models:sync tinfoil` syncs only Tinfoil.
 - `bun models:sync morph` syncs only Morph.
 - `bun models:sync nearai` syncs only NEAR AI Cloud.
+- `bun models:sync lowrouter` syncs only LowRouter.
 - `bun models:sync aggregators --dry-run` prints changes without writing model files.
 - `bun models:sync aggregators --new-only` creates new model files but skips updates and removals.
 - `bun models:sync <provider> --open-issues` opens GitHub issues for missing models (on by default only when `GITHUB_ACTIONS=true`).
@@ -351,6 +352,18 @@ xAI is implemented in `packages/core/src/sync/providers/xai.ts`.
 - A new model whose lab entry has `reasoning = true` is not created. The endpoint says nothing about how a route turns reasoning on, off or up, so the run opens a deduped GitHub issue asking for the route's controls to be researched and hand-authored in `capabilities.reasoning`. Once that file exists, the sync keeps it priced like any other. Reasoning is judged from the lab entry, never from `supported_features`.
 - A live model with no lab entry is not created either, and opens a missing-model issue. `openai/privacy-filter` is skipped silently because the token-cost schema cannot describe it.
 - Absence removes a model, so the fetch refuses a response carrying fewer than twenty models: a truncated list that still parses would otherwise be indistinguishable from a mass retirement. A local entry the catalog cannot price is republished unchanged rather than dropped, because dropping it would delete a route that is still served.
+
+## LowRouter Notes
+
+- LowRouter is implemented in `packages/core/src/sync/providers/lowrouter.ts`.
+- Source endpoint: `https://api.lowrouter.ai/v1/models?currency=usd`; no authentication required. `?currency=usd` quotes every route in USD, converting EUR-billed routes at LowRouter's monthly ECB fixing.
+- Only unscoped `auto/<creator>/<model>` chat IDs that list `chat.completions` in `endpoints` are read. Each is priced at the first of its `auto_routing.default_routes`, whose quote sits on the pinned `<host>/<creator>/<model>` entry under that route's `locode`.
+- Existing files get that route's input, output and cache prices. A route that quotes no cache price keeps the authored one; a route with no quote at all keeps the authored cost and is listed in the notices. A quote in any currency other than USD fails the run.
+- `lifecycle = "deprecated"` sets `status = "deprecated"`; otherwise the authored status is kept. Deprecated IDs are never removed.
+- Reasoning controls, capabilities, limits, context tiers and `base_model` stay hand-authored.
+- A header is rewritten only when the price under it moves: the lines describing the old price are replaced by the synced cost lines, and hand-written evidence from the first `# Effort`, `# Reasoning`, `# Limit`, `# Tool calls`, `# Long-context` or `# Anthropic` line on is kept. An unchanged price keeps the header byte for byte.
+- New IDs are not created (`skipCreates`) and open no issues (`trackMissingModels: false`); the sync report counts them by creator. LowRouter authors new models by hand, with per-route reasoning evidence.
+- Files absent from the listing are kept (`deleteMissing: false`). A response with fewer than 100 chat IDs is refused as truncated.
 
 ## OpenAI Notes
 
