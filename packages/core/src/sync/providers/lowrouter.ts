@@ -13,7 +13,10 @@ const MIN_LIVE_MODELS = 100;
 
 // Where hand-written evidence (reasoning probes, limits, tool calls) starts in a
 // header. Everything above it describes the price and is replaced when it moves.
-const EVIDENCE = /^# (Effort|Reasoning|Limit|Tool calls|Long-context|Anthropic)\b/;
+// `Toggle` and `Budget` are the wire-path lines AGENTS.md requires on toggle and
+// budget controls. `Anthropic's` is excluded: "# Anthropic's API, global endpoint;"
+// names a default route inside the price block, as "# OpenAI's API" does.
+const EVIDENCE = /^# (Toggle|Budget|Effort|Reasoning|Limit|Tool calls|Long-context|Anthropic(?!'s))\b/;
 
 const COST_HEADER = [
   `# Source: ${API_ENDPOINT} (synced).`,
@@ -122,7 +125,7 @@ export function lowRouterModels(entries: LowRouterEntry[]): LowRouterModel[] {
       const pricing = route === undefined || cut === -1
         ? undefined
         : pinned.get(route.slice(0, cut))?.regions?.find((region) => region.locode === route.slice(cut + 1))?.pricing;
-      if (pricing !== undefined && pricing.currency !== "USD") {
+      if (pricing !== undefined && pricing.currency.toUpperCase() !== "USD") {
         throw new Error(`LowRouter ${entry.id}: expected a USD quote from ${API_ENDPOINT}, got ${pricing.currency}`);
       }
       return { id: entry.id, deprecated: entry.lifecycle === "deprecated", route, pricing };
@@ -154,7 +157,8 @@ export function buildLowRouterModel(model: LowRouterModel, existing: ExistingMod
   const values = {
     ...current,
     cost: quote === undefined ? existing.cost : { ...existing.cost, ...quote },
-    status: model.deprecated ? "deprecated" : existing.status,
+    // LowRouter owns its lifecycle: an ID it stops flagging is no longer deprecated.
+    status: model.deprecated ? "deprecated" : existing.status === "deprecated" ? undefined : existing.status,
   } as SyncedFullModel;
   return {
     model: baseModel === undefined ? values : factorBaseModel(baseModel, values, existing.limit, baseModelOmit),

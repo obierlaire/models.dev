@@ -153,11 +153,13 @@ test("keeps context tiers authored under the base price", () => {
   expect(built.model.cost).toMatchObject({ input: 0.5282, tiers });
 });
 
-test("LowRouter's deprecated lifecycle sets status; otherwise the authored status stays", () => {
+test("LowRouter's lifecycle owns deprecated; an authored alpha or beta stays", () => {
   const deprecated = buildLowRouterModel(model({ deprecated: true }), existing(PLAIN_MODEL), HEADER);
   expect(deprecated.model.status).toBe("deprecated");
   const beta = buildLowRouterModel(model(), existing(PLAIN_MODEL, { status: "beta" }), HEADER);
   expect(beta.model.status).toBe("beta");
+  const revived = buildLowRouterModel(model(), existing(PLAIN_MODEL, { status: "deprecated" }), HEADER);
+  expect(revived.model.status).toBeUndefined();
 });
 
 test("an unpriced route keeps the authored cost and says so", () => {
@@ -176,6 +178,18 @@ test("a moved price replaces the cost lines and keeps the hand-written evidence"
   expect(header).toEndWith("# Effort: reasoning_effort = none|high, forwarded unchanged.\n# Limit: verified live.\n");
   expect(lowRouterHeader(header, true)).toBe(header);
   expect(lowRouterHeader("# Cost: old route only.\n", true)).not.toContain("old route");
+});
+
+test("a moved price keeps toggle wire paths and drops an Anthropic route line from the price block", () => {
+  const toggle = lowRouterHeader("# Cost: old.\n# Toggle: thinking.type = enabled|disabled\n# Effort: reasoning_effort = high\n", true);
+  expect(toggle).toEndWith("# Toggle: thinking.type = enabled|disabled\n# Effort: reasoning_effort = high\n");
+  const anthropic = lowRouterHeader(
+    "# Cost is the route a plain request resolved to:\n# Anthropic's API, global endpoint;\n# USD 5 in / 25 out per MTok.\n"
+      + "# Effort: reasoning_effort = high\n# Anthropic routes return no trace on chat completions.\n",
+    true,
+  );
+  expect(anthropic).not.toContain("USD 5 in");
+  expect(anthropic).toEndWith("# Effort: reasoning_effort = high\n# Anthropic routes return no trace on chat completions.\n");
 });
 
 test("translateModel reads the header the runner passes in", () => {
