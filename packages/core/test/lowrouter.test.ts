@@ -6,6 +6,7 @@ import type { ExistingModel } from "../src/sync/index.js";
 import {
   buildLowRouterModel,
   lowrouter,
+  lowRouterCostHeader,
   lowRouterHeader,
   type LowRouterModel,
   lowRouterModels,
@@ -174,18 +175,53 @@ test("an unpriced route keeps the authored cost and says so", () => {
 test("a moved price replaces the cost lines and keeps the hand-written evidence", () => {
   const header = buildLowRouterModel(model(), existing(PLAIN_MODEL), HEADER).header;
   expect(header).toStartWith("# Source: https://api.lowrouter.ai/v1/models?currency=usd (synced).\n");
+  expect(header).toContain("# was synced: somehost, eu endpoint;\n# that route bills in USD");
   expect(header).not.toContain("highest EUR price");
   expect(header).toEndWith("# Effort: reasoning_effort = none|high, forwarded unchanged.\n# Limit: verified live.\n");
-  expect(lowRouterHeader(header, true)).toBe(header);
-  expect(lowRouterHeader("# Cost: old route only.\n", true)).not.toContain("old route");
+  expect(lowRouterHeader(header, lowRouterCostHeader(model()), true)).toBe(header);
+  expect(lowRouterHeader("# Cost: old route only.\n", lowRouterCostHeader(model()), true)).not.toContain("old route");
+});
+
+test("a converted quote names its rate and date", () => {
+  const fx = [{ pair: "EURUSD", rate: 1.1298, as_of: "2026-10-01", source: "ecb", fixing: "monthly" }];
+  expect(lowRouterCostHeader(model({ fx }))).toContain(
+    "# that route bills in EUR; converted at 1.1298 USD/EUR (ECB monthly fixing, 2026-10-01).",
+  );
+  const [parsed] = parse([
+    autoEntry("auto/testlab/test-model", "somehost/testlab/test-model/eu"),
+    { ...pinnedEntry("somehost/testlab/test-model", "eu", { prompt_per_1m_tokens: 0.5, completion_per_1m_tokens: 1 }), fx },
+  ]);
+  expect(parsed?.fx).toEqual(fx);
+});
+
+test("a synced header stays put while the price holds, and its evidence survives a move", () => {
+  const evidence = "# Vision: verified live.\n# Effort: reasoning_effort = high\n";
+  const synced = lowRouterCostHeader(model()).join("\n") + "\n" + evidence;
+  const rerouted = lowRouterCostHeader(model({ route: "otherhost/testlab/test-model/eu" }));
+  expect(lowRouterHeader(synced, rerouted, false)).toBe(synced);
+  expect(lowRouterHeader(synced, rerouted, true)).toBe(rerouted.join("\n") + "\n" + evidence);
+});
+
+test("a malformed entry no auto ID routes to does not fail the run", () => {
+  const [priced] = parse([
+    autoEntry("auto/testlab/test-model", "somehost/testlab/test-model/eu"),
+    pinnedEntry("somehost/testlab/test-model", "eu", { prompt_per_1m_tokens: 0.5, completion_per_1m_tokens: 1 }),
+    { id: "embedhost/testlab/test-embed", regions: [{ locode: "eu", pricing: { currency: "USD", prompt_per_1m_tokens: 0.1 } }] },
+  ]);
+  expect(priced?.pricing).toMatchObject({ prompt_per_1m_tokens: 0.5 });
 });
 
 test("a moved price keeps toggle wire paths and drops an Anthropic route line from the price block", () => {
-  const toggle = lowRouterHeader("# Cost: old.\n# Toggle: thinking.type = enabled|disabled\n# Effort: reasoning_effort = high\n", true);
+  const toggle = lowRouterHeader(
+    "# Cost: old.\n# Toggle: thinking.type = enabled|disabled\n# Effort: reasoning_effort = high\n",
+    lowRouterCostHeader(model()),
+    true,
+  );
   expect(toggle).toEndWith("# Toggle: thinking.type = enabled|disabled\n# Effort: reasoning_effort = high\n");
   const anthropic = lowRouterHeader(
     "# Cost is the route a plain request resolved to:\n# Anthropic's API, global endpoint;\n# USD 5 in / 25 out per MTok.\n"
       + "# Effort: reasoning_effort = high\n# Anthropic routes return no trace on chat completions.\n",
+    lowRouterCostHeader(model()),
     true,
   );
   expect(anthropic).not.toContain("USD 5 in");

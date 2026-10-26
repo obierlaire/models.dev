@@ -11,19 +11,17 @@ const API_ENDPOINT = "https://api.lowrouter.ai/v1/models?currency=usd";
 // short list that still parses is a truncated response, not a catalog to sync.
 const MIN_LIVE_MODELS = 100;
 
-// Where hand-written evidence (reasoning probes, limits, tool calls) starts in a
-// header. Everything above it describes the price and is replaced when it moves.
-// `Toggle` and `Budget` are the wire-path lines AGENTS.md requires on toggle and
-// budget controls. `Anthropic's` is excluded: "# Anthropic's API, global endpoint;"
-// names a default route inside the price block, as "# OpenAI's API" does.
-const EVIDENCE = /^# (Toggle|Budget|Effort|Reasoning|Limit|Tool calls|Long-context|Anthropic(?!'s))\b/;
+// The price block of a header ends on the debit line, in the synced header and
+// in the hand-written ones before it. Everything after it is evidence and is kept.
+const SYNCED_SOURCE = `# Source: ${API_ENDPOINT} (synced).`;
+const DEBITED = "# response carries the amount debited.";
 
-const COST_HEADER = [
-  `# Source: ${API_ENDPOINT} (synced).`,
-  "# Cost is the quote of the route LowRouter's default routing profile resolves this ID to; EUR-billed",
-  "# routes are converted at LowRouter's monthly ECB fixing. Another route can serve a request (the key's",
-  "# routing policy, or a failover); usage.cost on the response carries the amount debited.",
-];
+// For a header with no debit line: where hand-written evidence (reasoning probes,
+// limits, tool calls) starts. `Toggle` and `Budget` are the wire-path lines
+// AGENTS.md requires on toggle and budget controls. `Anthropic's` is excluded:
+// "# Anthropic's API, global endpoint;" names a default route inside the price
+// block, as "# OpenAI's API" does.
+const EVIDENCE = /^# (Toggle|Budget|Effort|Reasoning|Limit|Tool calls|Long-context|Anthropic(?!'s))\b/;
 
 const Pricing = z.object({
   currency: z.string(),
@@ -31,6 +29,25 @@ const Pricing = z.object({
   completion_per_1m_tokens: z.number().nonnegative(),
   cache_read_per_1m_tokens: z.number().nonnegative().optional(),
   cache_write_per_1m_tokens: z.number().nonnegative().optional(),
+}).passthrough();
+
+// The conversion LowRouter applied to a route billed in another currency.
+const Fx = z.object({
+  pair: z.string().length(6),
+  rate: z.number().positive(),
+  as_of: z.string(),
+  source: z.string().optional(),
+  fixing: z.string().optional(),
+}).passthrough();
+
+// A pinned `<host>/<creator>/<model>` entry, parsed only when an auto ID routes
+// to it, so a malformed entry the sync never reads cannot fail the run.
+const Pinned = z.object({
+  fx: z.array(Fx).optional(),
+  regions: z.array(z.object({
+    locode: z.string(),
+    pricing: Pricing.optional(),
+  }).passthrough()).optional(),
 }).passthrough();
 
 const LowRouterEntry = z.object({
@@ -41,14 +58,10 @@ const LowRouterEntry = z.object({
   auto_routing: z.object({
     default_routes: z.array(z.string()).optional(),
   }).passthrough().optional(),
-  regions: z.array(z.object({
-    locode: z.string(),
-    pricing: Pricing.optional(),
-  }).passthrough()).optional(),
 }).passthrough();
 
 export const LowRouterResponse = z.object({
-  data: z.array(LowRouterEntry),
+  data: z.array(z.object({ id: z.string().min(1) }).passthrough()),
 }).passthrough();
 
 type LowRouterEntry = z.infer<typeof LowRouterEntry>;
@@ -59,6 +72,8 @@ export interface LowRouterModel {
   deprecated: boolean;
   route?: string;
   pricing?: z.infer<typeof Pricing>;
+  /** The currency conversion behind the quote; empty for a route billed in USD. */
+  fx?: z.infer<typeof Fx>[];
 }
 
 export const lowrouter = {
@@ -111,24 +126,28 @@ export const lowrouter = {
 
 // Chat auto IDs served on Chat Completions, each priced at its first default
 // route. Pinned entries (`<host>/<creator>/<model>`) carry the per-region quotes.
-export function lowRouterModels(entries: LowRouterEntry[]): LowRouterModel[] {
+export function lowRouterModels(entries: Array<{ id: string }>): LowRouterModel[] {
   const pinned = new Map(entries.map((entry) => [entry.id, entry]));
   const models = entries
+    .filter((entry) => entry.id.startsWith("auto/") && entry.id.split("/").length === 3)
+    .map((entry) => LowRouterEntry.parse(entry))
     .filter((entry) =>
-      entry.id.startsWith("auto/")
-      && entry.id.split("/").length === 3
-      && (entry.modality ?? "chat") === "chat"
+      (entry.modality ?? "chat") === "chat"
       && (entry.endpoints ?? []).includes("chat.completions"))
     .map((entry) => {
       const route = entry.auto_routing?.default_routes?.[0];
       const cut = route?.lastIndexOf("/") ?? -1;
-      const pricing = route === undefined || cut === -1
-        ? undefined
-        : pinned.get(route.slice(0, cut))?.regions?.find((region) => region.locode === route.slice(cut + 1))?.pricing;
+      const host = route === undefined || cut === -1 ? undefined : pinned.get(route.slice(0, cut));
+      const parsed = host === undefined ? undefined : Pinned.safeParse(host);
+      if (parsed?.success === false) {
+        throw new Error(`LowRouter ${entry.id}: default route ${route} has a malformed quote`, { cause: parsed.error });
+      }
+      const quote = parsed?.data;
+      const pricing = quote?.regions?.find((region) => region.locode === route!.slice(cut + 1))?.pricing;
       if (pricing !== undefined && pricing.currency.toUpperCase() !== "USD") {
         throw new Error(`LowRouter ${entry.id}: expected a USD quote from ${API_ENDPOINT}, got ${pricing.currency}`);
       }
-      return { id: entry.id, deprecated: entry.lifecycle === "deprecated", route, pricing };
+      return { id: entry.id, deprecated: entry.lifecycle === "deprecated", route, pricing, fx: quote?.fx };
     });
   if (models.length < MIN_LIVE_MODELS) {
     throw new Error(
@@ -162,19 +181,40 @@ export function buildLowRouterModel(model: LowRouterModel, existing: ExistingMod
   } as SyncedFullModel;
   return {
     model: baseModel === undefined ? values : factorBaseModel(baseModel, values, existing.limit, baseModelOmit),
-    header: lowRouterHeader(header, moved),
+    header: quote === undefined ? header : lowRouterHeader(header, lowRouterCostHeader(model), moved),
     notices: quote === undefined
       ? [`LowRouter ${model.id}: default route ${model.route ?? "(none)"} has no quote; kept the authored cost.`]
       : undefined,
   };
 }
 
-// An unchanged price keeps its header byte for byte. A moved one gets the
-// synced cost lines in place of whatever described the old price, above the
-// hand-written evidence, which is kept.
-export function lowRouterHeader(header: string, moved: boolean) {
+// The synced price block: the route the cost was read from when it was synced,
+// and the conversion behind it, which AGENTS.md asks a converted price to note
+// with its rate and date. A new rate moves the price, so it is never stale.
+export function lowRouterCostHeader(model: LowRouterModel) {
+  const [host, , , locode] = model.route?.split("/") ?? [];
+  const [fx] = model.fx ?? [];
+  const via = [fx?.source?.toUpperCase(), fx?.fixing && `${fx.fixing} fixing`].filter(Boolean).join(" ");
+  return [
+    SYNCED_SOURCE,
+    `# Cost is the quote of the route LowRouter's default routing profile resolved this ID to when the price`,
+    `# was synced: ${host}, ${locode} endpoint;`,
+    fx === undefined
+      ? "# that route bills in USD, so this is its quote with no currency conversion."
+      : `# that route bills in ${fx.pair.slice(0, 3)}; converted at ${fx.rate} ${fx.pair.slice(3)}/${fx.pair.slice(0, 3)}`
+        + ` (${via === "" ? "" : `${via}, `}${fx.as_of}).`,
+    "# Another route can serve a request (the key's routing policy, or a failover); usage.cost on the",
+    DEBITED,
+  ];
+}
+
+// An unchanged price keeps its header byte for byte, so a route that moves at
+// the same price opens no change. A moved price gets the synced price block in
+// place of the old one, above the hand-written evidence, which is kept.
+export function lowRouterHeader(header: string, costHeader: string[], moved: boolean) {
   if (!moved) return header;
   const lines = header.trimEnd().split("\n");
-  const start = lines.findIndex((line) => EVIDENCE.test(line));
-  return [...COST_HEADER, ...(start === -1 ? [] : lines.slice(start))].join("\n") + "\n";
+  const end = lines.indexOf(DEBITED);
+  const start = end === -1 ? lines.findIndex((line) => EVIDENCE.test(line)) : end + 1;
+  return [...costHeader, ...(start === -1 ? [] : lines.slice(start))].join("\n") + "\n";
 }
